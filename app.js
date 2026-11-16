@@ -339,6 +339,7 @@
       parts.push('<span><b>Bill reminder:</b> ' + esc(billWhat(b)) + ', your share is ' + money(r2(billShare(b) - billPaidBy(b, me.name))) + (b.due ? (daysTo(b.due) < 0 ? ', overdue since ' : ', due ') + esc(fmtDay(b.due)) : '') + '.</span><button class="btn small ghost" type="button" data-billpay="' + esc(b.id) + '">I paid my share</button>');
     });
     if (due.bills.length > 3) parts.push('<span>And ' + (due.bills.length - 3) + ' more bills to pay. They\'re in Bills below.</span>');
+    var pp = pushPrompt(); if (pp) parts.push(pp);
     $('banner').innerHTML = parts.map(function (p) { return '<div class="bline">' + p + '</div>'; }).join('');
     $('banner').hidden = parts.length === 0;
     /* the number on the home-screen icon: how many things you still need to pay */
@@ -1131,6 +1132,71 @@
     if (who && PEOPLE.indexOf(who) >= 0) enterApp({ name: who, id: 'local:' + who }); else showAuth('login');
   }
 
+  /* ---------- phone notifications (web push): sw.js shows them, the Supabase "notify" function sends them ---------- */
+  var pushState = 'off';   /* off | unsupported | install | ask | denied | on */
+  var swReg = null;
+  function isIOS() { return /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); }
+  function standalone() { return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true; }
+  function b64u(s) {
+    var raw = atob((s + '==='.slice((s.length + 3) % 4)).replace(/-/g, '+').replace(/_/g, '/')), a = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) a[i] = raw.charCodeAt(i);
+    return a;
+  }
+  function subParts(sub) { var j = sub.toJSON(); return { p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth }; }
+  function pushRefresh() { renderBanner(); syncPushBtn(); }
+  function pushInit() {
+    if (!CLOUD || !CFG.pushPublicKey) return;
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) { pushState = isIOS() && !standalone() ? 'install' : 'unsupported'; pushRefresh(); return; }
+    navigator.serviceWorker.register('sw.js').then(function (reg) { swReg = reg; return reg.pushManager.getSubscription(); }).then(function (sub) {
+      if (sub && Notification.permission === 'granted') { pushState = 'on'; return sb.rpc('save_push_sub', subParts(sub)); }
+      pushState = Notification.permission === 'denied' ? 'denied' : 'ask';
+    }).catch(function (e) { pushState = 'unsupported'; report('Notification setup: ' + errMsg(e)); }).then(pushRefresh);
+  }
+  function pushOn() {
+    if (!swReg) { toast('Notifications aren\'t available here. On iPhone, open Studio 1 from its home-screen icon.'); return; }
+    Notification.requestPermission().then(function (p) {
+      if (p !== 'granted') {
+        pushState = p === 'denied' ? 'denied' : 'ask'; pushRefresh();
+        toast(p === 'denied' ? 'Notifications are blocked for Studio 1. Allow them in Settings > Notifications > Studio 1.' : 'Notifications not turned on.');
+        return;
+      }
+      return swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(CFG.pushPublicKey) }).then(function (sub) {
+        return sb.rpc('save_push_sub', subParts(sub));
+      }).then(function (res) {
+        if (res && res.error) throw res.error;
+        pushState = 'on'; pushRefresh(); toast('Notifications are on for this device.');
+      });
+    }).catch(function (e) { toast('Could not turn on notifications: ' + errMsg(e) + '.'); report('Notification sign-up failed: ' + errMsg(e)); });
+  }
+  function pushOff() {
+    if (!swReg) return;
+    swReg.pushManager.getSubscription().then(function (sub) {
+      if (!sub) return;
+      return sb.rpc('drop_push_sub', { p_endpoint: sub.endpoint }).then(function () { return sub.unsubscribe(); });
+    }).then(function () { pushState = 'ask'; lsSet('studio1-push-later', '1'); pushRefresh(); toast('Notifications are off for this device.'); })
+      .catch(function (e) { toast('Could not turn them off: ' + errMsg(e) + '.'); });
+  }
+  function pushPrompt() {
+    if (lsGet('studio1-push-later') === '1') return '';
+    if (pushState === 'ask') return '<span><b>Notifications:</b> get a ping on this device when a bill or dry hire is logged, and a week and 3 days before rent and bills are due.</span><button class="btn small" type="button" id="pushYes">Turn on</button><button class="btn small ghost" type="button" id="pushLater">Not now</button>';
+    if (pushState === 'install') return '<span><b>Notifications:</b> to get them on your iPhone, open Studio 1 from its home-screen icon and turn them on there.</span><button class="btn small ghost" type="button" id="pushLater">OK</button>';
+    return '';
+  }
+  function syncPushBtn() {
+    var b = $('pushBtn'); if (!b) return;
+    b.hidden = ['on', 'ask', 'denied'].indexOf(pushState) < 0;
+    b.textContent = pushState === 'on' ? 'Turn off notifications on this device' : 'Turn on notifications on this device';
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target && e.target.closest ? e.target.closest('#pushYes, #pushLater, #pushBtn') : null;
+    if (!t) return;
+    if (t.id === 'pushYes') pushOn();
+    else if (t.id === 'pushLater') { lsSet('studio1-push-later', '1'); renderBanner(); }
+    else if (pushState === 'on') pushOff();
+    else if (pushState === 'denied') toast('Notifications are blocked for Studio 1. Allow them in Settings > Notifications > Studio 1.');
+    else pushOn();
+  });
+
   /* shared mode: Supabase email + password */
   var signUp = false, entering = null;
   function setAuthMode(up) {
@@ -1163,6 +1229,7 @@
       people = (res.data || []).map(function (r) { return r.name; }).filter(function (n, i, a) { return a.indexOf(n) === i && (n !== 'Test' || n === row.name); });
       enterApp({ name: row.name, id: session.user.id });
       listen();
+      pushInit();
       return loadAll();
     }).catch(function (e) { entering = null; showAuth('login'); authErr('Could not check the member list: ' + errMsg(e)); report('Member check failed: ' + errMsg(e)); });
   }

@@ -5,6 +5,8 @@
 window.VALENTI_CONFIG = {
   supabaseUrl: 'https://lqzpaswwlgkcornqnizx.supabase.co',
   supabaseAnonKey: 'sb_publishable_QmnvfS6u0_p_njBC_TTPyw_Os_Lgt6z',
+  /* Public half of the phone-notification key (the private half stays in the database). Safe to publish. */
+  pushPublicKey: 'BD6ZSGqVrgi0uKgj1y3J35qaIF0Ccobs2cp9bBO4mdSOD8ZZcLWeKE09RD9K4oCcqILOQ1bUB0RMvWOgvG_qZck',
   /* Used in test mode only. With Supabase, names come from the members table. */
   people: ['Sasha', 'Carl', 'Brandon', 'Cai']
 };
